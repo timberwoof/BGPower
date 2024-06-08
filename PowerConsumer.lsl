@@ -1,231 +1,266 @@
-integer REGISTER_CHANNEL = -654647;
-integer register_listen;
-string ME;
-vector MYPOS;
+// Power Panel 
+// Incremental build-up of Lamp Power Logicl 
 
-integer clock_interval = 10;
+integer POWER_CHANNEL = -654647;
+integer clock_interval = 1;
+integer power_ask = 100;
+integer power_draw = 0;
 
-integer my_channel;
-integer my_listen;
+string REQ = "-REQ";
+string ACK = "-ACK";
+string PING = "Ping";
+string STATUS = "Status";
+string CONNECT = "Connect";
+string DISCONNECT = "Disconnect";
+string POWER = "Power";
+string RESET = "Reset";
+string NONE = "None";
+integer ON = TRUE;
+integer OFF = FALSE;
 
-string CONNECT  = "connect";
-string MYLOCATION = "mylocation";
-string YOURLOCATION = "yourlocation";
-string POWERSTATUS = "powerstatus";
-string POWERUSE = "poweruse";
-string REGISTER = "register";
-string ASK = "?";
-string PHB = "phb";
-string OFF = "0";
-string ON = "1";
-
-string my_power_status;
-float my_power_draw = 100.0;
-float my_stability = 1.0;
-string my_power_panel;
+list power_panel_keys;
+list power_panel_names;
+key my_power_panel_key;
+string my_power_panel_name;
+integer connected;
+integer power_state;
 
 integer dialog_channel;
 integer dialog_listen;
 integer dialog_countdown;
-integer PHB_status;
 
-sendMessage(integer channel, string to, string command, string parameter)
-{
-    llRegionSay(channel, to+","+ME+","+command+","+parameter);
+string CLOSE = "Close";
+string mainMenu = "Main";
+string menuIdentifier;
+key menuAgentKey;
+integer menuChannel;
+integer menuListen;
+integer menuTimeout;
+
+integer DEBUG = TRUE;
+sayDebug(string message) {
+    if (DEBUG) {
+        llSay(0,message);
+    }
 }
 
-string updateStatus()
-{
-    string status = "Designation: " + ME + "\n";
-    status = status + "Status: " + (string)my_power_status+ "\n";
-    status = status + "Power Draw: "+ (string)my_power_draw+ "\n";
-    status = status + "Stability: "+ (string)my_stability+ "\n";
-    status = status + "Connected to: "+ my_power_panel+ "\n";
-
-    return status;
+string power_state_to_string(integer power_state) {
+    if (power_state) {
+        return "On";
+    } else {
+        return "Off";
+    }
 }
 
-dialog_result(key agent, string message)
+report_status() {
+    llSay(0,"Power: "+power_state_to_string(power_state)+" Consuming "+(string)power_draw+" watts from power source: "+my_power_panel_name);
+}
+
+string menuCheckbox(string title, integer onOff)
+// make checkbox menu item out of a button title and boolean state
 {
-    //llWhisper(0,"dialog: "+message);
-    // list buttons = ["analyze","test","fix","set feed","set power","switch", "connect", "disconnect"];
-    if (message=="analyze")
+    string checkbox;
+    if (onOff)
     {
-        llInstantMessage(agent, updateStatus());
+        checkbox = "☒";
     }
-    if (message=="test")
+    else
     {
-        llInstantMessage(agent, updateStatus());
+        checkbox = "☐";
     }
-    if (message=="set power")
+    return checkbox + " " + title;
+}
+
+list menuRadioButton(string title, string match)
+// make radio button menu item out of a button and the state text
+{
+    string radiobutton;
+    if (title == match)
     {
-        // do something to my_power_rating
+        radiobutton = "●";
     }
-    if (message=="switch")
+    else
     {
-        if (my_power_status == ON)
-        {
-            my_power_status == OFF;
+        radiobutton = "○";
+    }
+    return [radiobutton + " " + title];
+}
+
+list menuButtonActive(string title, integer onOff)
+// make a menu button be the text or the Inactive symbol
+{
+    string button;
+    if (onOff)
+    {
+        button = title;
+    }
+    else
+    {
+        button = "["+title+"]";
+    }
+    return [button];
+}
+
+string trimMessageButton(string message) {
+    string messageButtonsTrimmed = message;
+    list striplist = ["☒ ","☐ ","● ","○ "];
+    integer i;
+    for (i=0; i < llGetListLength(striplist); i = i + 1) {
+        string thing = llList2String(striplist, i);
+        integer whereThing = llSubStringIndex(messageButtonsTrimmed, thing);
+        if (whereThing > -1) {
+            integer thingLength = llStringLength(thing)-1;
+            messageButtonsTrimmed = llDeleteSubString(messageButtonsTrimmed, whereThing, whereThing + thingLength);
         }
-        else
-        {
-            my_power_status == ON;
-        }
-        sendMessage(my_channel, my_power_panel, POWERSTATUS, my_power_status);
     }
-    if (message=="connect")
-    {
-        sendMessage(REGISTER_CHANNEL,"*",REGISTER,(string)my_channel);
-    }
-    if (message=="disconnect")
-    {
-        llListenRemove(my_channel);
-        my_channel = 0;
-        my_power_panel = "";
-        my_power_status = OFF;
-    }
-
+    return messageButtonsTrimmed;
 }
 
+setUpMenu(string identifier, key avatarKey, string message, list buttons)
+// wrapper to do all the calls that make a simple menu dialog.
+// - adds required buttons such as Close or Main
+// - displays the menu command on the alphanumeric display
+// - sets up the menu channel, listen, and timer event 
+// - calls llDialog
+// parameters:
+// identifier - sets menuIdentifier, the later context for the command
+// avatarKey - uuid of who clicked
+// message - text for top of blue menu dialog
+// buttons - list of button texts
+{
+    sayDebug("setUpMenu "+identifier);
+    
+    if (identifier != mainMenu) {
+        buttons = buttons + [mainMenu];
+    }
+    buttons = buttons + [CLOSE];
+    
+    menuIdentifier = identifier;
+    menuAgentKey = avatarKey; // remember who clicked
+    menuChannel = -(llFloor(llFrand(10000)+1000));
+    menuListen = llListen(menuChannel, "", avatarKey, "");
+    menuTimeout = llFloor(llGetTime()) + 30;
+    llDialog(avatarKey, message, buttons, menuChannel);
+}
+
+resetMenu() {
+    llListenRemove(menuListen);
+    menuListen = 0;
+    menuChannel = 0;
+    menuAgentKey = "";
+}
+
+presentMainMenu(key whoClicked) {
+    string message = "Lamp Main Menu";
+    list buttons = [];
+    buttons = buttons + menuButtonActive(menuCheckbox("Power", power_state), connected);
+    buttons = buttons + STATUS;
+    buttons = buttons + menuButtonActive(PING, !connected); 
+    buttons = buttons + menuButtonActive(CONNECT, !connected); 
+    buttons = buttons + menuButtonActive(DISCONNECT, connected); 
+    buttons = buttons + menuButtonActive(RESET, !connected);
+    setUpMenu(mainMenu, whoClicked, message, buttons);
+}
+
+ping_req() {
+    sayDebug ("ping_req");
+    power_panel_keys = [];
+    power_panel_names = [];
+    llSay(POWER_CHANNEL, PING+REQ);
+}
+
+ping_ack(string name, key objectKey) {
+    sayDebug ("ping_ack");
+    power_panel_keys = power_panel_keys + [objectKey];
+    power_panel_names = power_panel_names + [name];
+}
+
+presentConnectMenu(key whoClicked) {
+    string message = "Select Power Distribution Panel to Connect To:";
+    integer i;
+    list buttons = [];
+    for (i = 0; i < llGetListLength(power_panel_names); i = i + 1) {
+        message = message + "\n" + (string)i + " " + llList2String(power_panel_names, i);
+        sayDebug("presentConenctMenu:"+message);
+        buttons = buttons + [(string)i];
+    }
+    setUpMenu(CONNECT, whoClicked, message, buttons);    
+}
+
+switch_power() {
+    if (power_state) {
+        llRegionSayTo(my_power_panel_key, POWER_CHANNEL, POWER+REQ+"[0]");
+    } else {
+        llRegionSayTo(my_power_panel_key, POWER_CHANNEL, POWER+REQ+"["+(string)power_ask+"]");
+    }
+}
 
 default
 {
     state_entry()
     {
-        ME = llGetObjectDesc();
-        MYPOS = llGetPos();
-        PHB_status = 0;
-        llSetTimerEvent(10);
-        register_listen = llListen(REGISTER_CHANNEL,"","","");
-
-        my_channel = 0;
-        my_listen = 0;
-        my_power_panel = "none";
-        my_power_status = OFF;
-
-        sendMessage(REGISTER_CHANNEL, "*", CONNECT, "*");
-     }
+        sayDebug("state_entry");
+        llSetTimerEvent(1);
+        llListen(POWER_CHANNEL, "", NULL_KEY, "");
+        my_power_panel_key = NULL_KEY;
+        my_power_panel_name = NONE;
+        power_state = OFF;
+        connected = FALSE;
+    }
 
     touch_start(integer total_number)
     {
-        key agent = llDetectedKey(0);
-        string message = "Select the maintenance function for this power panel:";
-        list buttons = ["analyze","test","fix","set feed","set power","switch", "connect", "disconnect"];
-        dialog_channel = llFloor(llFrand(10000));
-        dialog_listen = llListen(dialog_channel, "", agent, "");
-        llDialog(agent, message, buttons, dialog_channel);
-        dialog_countdown = 30;
+        sayDebug("touch_start");
+        key whoClicked  = llDetectedKey(0);
+        presentMainMenu(whoClicked);
+    }
+    
+    listen(integer channel, string name, key objectKey, string message )
+    {
+        sayDebug("listen name:"+name+" message:"+message);
+        
+        if (channel == menuChannel) {
+            resetMenu();
+            if (message == CLOSE) {
+                sayDebug("listen Close");
+            } else if (message == STATUS) {
+                report_status();
+            } else if (message == RESET) {
+                llResetScript();
+            } else if (message == PING) {
+                ping_req();
+            } else if (message == CONNECT) {
+                presentConnectMenu(objectKey);
+            } else if (message == DISCONNECT) {
+                sayDebug("listen DISCONNECT from "+name+": "+message);
+                llRegionSayTo(llList2Key(power_panel_keys, (integer)message), POWER_CHANNEL, DISCONNECT+REQ);
+            } else if (menuIdentifier == CONNECT) {
+                sayDebug("listen CONNECT from "+name+": "+message);
+                llRegionSayTo(llList2Key(power_panel_keys, (integer)message), POWER_CHANNEL, CONNECT+REQ);
+            } else if (trimMessageButton(message) == POWER) {
+                switch_power();
+            } else {
+                sayDebug("listen did not handle "+message);
+            }
+        } else if (channel == POWER_CHANNEL) {
+            if (message == PING+ACK) {
+                ping_ack(name, objectKey);
+            } else if (message == CONNECT+ACK) {
+                my_power_panel_key = objectKey;
+                my_power_panel_name = name;
+                connected = TRUE;
+            } else if (message == DISCONNECT+ACK) {
+                my_power_panel_key = NULL_KEY;
+                my_power_panel_name = NONE;
+                connected = FALSE;
+            }
+        }
     }
 
-    listen(integer channel, string name, key agent, string message)
-    {
-        list parameters = llCSV2List(message);
-        // to, from, command, parameter
-        string to = llList2String(parameters,0);
-        string from = llList2String(parameters,1);
-        string command = llList2String(parameters,2);
-        string parameter = llList2String(parameters,3);
-        //llWhisper(0,to+": "+from+": "+command+": "+parameter);
-
-        if (channel == REGISTER_CHANNEL)
-        {
-            if (command == CONNECT)
-            {
-                // I have not registered with any power panel.
-                // One is asking me to respond. Set it as my power panel.
-                if (my_channel == 0)
-                {
-                    my_channel = (integer)parameter;
-                    my_listen = llListen(my_channel,"","","");
-                    my_power_panel = from;
-                }
-                // I have a power panel.
-                // It is asking me to reset my channel to it.
-                else if (my_power_panel == from)
-                {
-                    llListenRemove(my_listen);
-                    my_channel = (integer)parameter;
-                    my_listen = llListen(my_channel,"","","");
-                }
-            }
-            else if (command == PHB)
-            {
-                PHB_status = 120; // for two minutes we'll be in PHB mode
-            }
+    timer() {
+        integer now = llFloor(llGetTime());
+        if (now > menuTimeout) {
+            resetMenu();
         }
-        // The message is on the power panel channel.
-        // It is to me or to everyone on the channel.
-        if ((channel == my_channel) & ((to == ME) | (to == "*")))
-        {
-            if (command == POWERSTATUS)
-            {
-                if (parameter == "?")
-                {
-                    //llWhisper(0,"received powerstatus inquiry");
-                    sendMessage(my_channel, from, POWERSTATUS, my_power_status);
-                }
-                else if (parameter == ON)
-                {
-                    //llWhisper(0,"received powerstatus set on");
-                    my_power_status == parameter;
-                    sendMessage(my_channel, from, POWERSTATUS, parameter);
-                    sendMessage(my_channel, from, POWERUSE, (string)my_power_draw);
-                    llSetColor(<1,1,1>,1);
-                }
-                else if (parameter == OFF)
-                {
-                    //llWhisper(0,"received powerstatus set off");
-                    my_power_status == parameter;
-                    sendMessage(my_channel, from, POWERSTATUS, parameter);
-                    llSetColor(<.25,.25,.25>,1);
-                }
-            }
-            else if (command == POWERUSE)
-            {
-                //llWhisper(0,"received poweruse inquiry");
-                if (parameter == "?")
-                {
-                    sendMessage(my_channel, my_power_panel, POWERUSE, (string)my_power_draw);
-                }
-            }
-            else if (command == YOURLOCATION)
-            {
-                sendMessage(my_channel, from, MYLOCATION, (string)llGetPos());
-            }
-            else if ((command == REGISTER) & (from == my_power_panel))
-            {
-                sendMessage(REGISTER_CHANNEL, my_power_panel, CONNECT, "*");
-            }
-        }
-        else if (channel = dialog_channel)
-        {
-            llListenRemove(dialog_channel);
-            dialog_channel = 0;
-            dialog_countdown = -1;
-            dialog_result(agent, message);
-        }
-        llSetText(updateStatus(),<1,1,1>,1);
-    }
-
-    timer()
-    {
-        if (PHB_status > 0)
-        {
-            PHB_status = PHB_status - clock_interval;
-        }
-
-        if (dialog_countdown > 0)
-        {
-            dialog_countdown = dialog_countdown - clock_interval;
-        }
-        else if (dialog_countdown == 0)
-        {
-            llListenRemove(dialog_channel);
-            dialog_channel = 0;
-            dialog_countdown = -1;
-        }
-
-        llSetText(updateStatus(),<1,1,1>,1);
     }
 }
-
